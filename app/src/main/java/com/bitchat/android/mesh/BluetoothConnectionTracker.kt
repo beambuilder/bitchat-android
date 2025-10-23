@@ -20,10 +20,10 @@ class BluetoothConnectionTracker(
     
     companion object {
         private const val TAG = "BluetoothConnectionTracker"
-        private const val CONNECTION_RETRY_DELAY = 5000L
-        private const val MAX_CONNECTION_ATTEMPTS = 3
-        private const val CLEANUP_DELAY = 500L
-        private const val CLEANUP_INTERVAL = 30000L // 30 seconds
+        private const val CONNECTION_RETRY_DELAY = com.bitchat.android.util.AppConstants.Mesh.CONNECTION_RETRY_DELAY_MS
+        private const val MAX_CONNECTION_ATTEMPTS = com.bitchat.android.util.AppConstants.Mesh.MAX_CONNECTION_ATTEMPTS
+        private const val CLEANUP_DELAY = com.bitchat.android.util.AppConstants.Mesh.CONNECTION_CLEANUP_DELAY_MS
+        private const val CLEANUP_INTERVAL = com.bitchat.android.util.AppConstants.Mesh.CONNECTION_CLEANUP_INTERVAL_MS // 30 seconds
     }
     
     // Connection tracking - reduced memory footprint
@@ -202,6 +202,17 @@ class BluetoothConnectionTracker(
     }
     
     /**
+     * Disconnect a specific device (by MAC address)
+     */
+    fun disconnectDevice(deviceAddress: String) {
+        connectedDevices[deviceAddress]?.gatt?.let {
+            try { it.disconnect() } catch (_: Exception) { }
+        }
+        cleanupDeviceConnection(deviceAddress)
+        Log.d(TAG, "Requested disconnect for $deviceAddress")
+    }
+
+    /**
      * Remove a pending connection
      */
     fun removePendingConnection(deviceAddress: String) {
@@ -224,19 +235,38 @@ class BluetoothConnectionTracker(
      * Enforce connection limits by disconnecting oldest connections
      */
     fun enforceConnectionLimits() {
-        val maxConnections = powerManager.getMaxConnections()
-        if (connectedDevices.size > maxConnections) {
-            Log.i(TAG, "Enforcing connection limit: ${connectedDevices.size} > $maxConnections")
-            
-            // Disconnect oldest client connections first
-            val sortedConnections = connectedDevices.values
-                .filter { it.isClient }
+        // Read debug overrides if available
+        val dbg = try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance() } catch (_: Exception) { null }
+        val maxOverall = dbg?.maxConnectionsOverall?.value ?: powerManager.getMaxConnections()
+        val maxClient = dbg?.maxClientConnections?.value ?: maxOverall
+        val maxServer = dbg?.maxServerConnections?.value ?: maxOverall
+
+        val clients = connectedDevices.values.filter { it.isClient }
+        val servers = connectedDevices.values.filter { !it.isClient }
+
+        // Enforce client cap first (we can actively disconnect)
+        if (clients.size > maxClient) {
+            Log.i(TAG, "Enforcing client cap: ${clients.size} > $maxClient")
+            val toDisconnect = clients.sortedBy { it.connectedAt }.take(clients.size - maxClient)
+            toDisconnect.forEach { dc ->
+                Log.d(TAG, "Disconnecting client ${dc.device.address} due to client cap")
+                dc.gatt?.disconnect()
+            }
+        }
+
+        // Note: server cap enforced in GattServerManager (we don't have server handle here)
+
+        // Enforce overall cap by disconnecting oldest client connections
+        if (connectedDevices.size > maxOverall) {
+            Log.i(TAG, "Enforcing overall cap: ${connectedDevices.size} > $maxOverall")
+            val excess = connectedDevices.size - maxOverall
+            val toDisconnect = connectedDevices.values
+                .filter { it.isClient } // only clients from here
                 .sortedBy { it.connectedAt }
-            
-            val toDisconnect = sortedConnections.take(connectedDevices.size - maxConnections)
-            toDisconnect.forEach { deviceConn ->
-                Log.d(TAG, "Disconnecting ${deviceConn.device.address} due to connection limit")
-                deviceConn.gatt?.disconnect()
+                .take(excess)
+            toDisconnect.forEach { dc ->
+                Log.d(TAG, "Disconnecting client ${dc.device.address} due to overall cap")
+                dc.gatt?.disconnect()
             }
         }
     }

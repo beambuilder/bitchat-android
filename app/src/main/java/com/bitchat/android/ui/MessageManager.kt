@@ -13,8 +13,8 @@ class MessageManager(private val state: ChatState) {
     // Message deduplication - FIXED: Prevent duplicate messages from dual connection paths
     private val processedUIMessages = Collections.synchronizedSet(mutableSetOf<String>())
     private val recentSystemEvents = Collections.synchronizedMap(mutableMapOf<String, Long>())
-    private val MESSAGE_DEDUP_TIMEOUT = 30000L // 30 seconds
-    private val SYSTEM_EVENT_DEDUP_TIMEOUT = 5000L // 5 seconds
+    private val MESSAGE_DEDUP_TIMEOUT = com.bitchat.android.util.AppConstants.UI.MESSAGE_DEDUP_TIMEOUT_MS // 30 seconds
+    private val SYSTEM_EVENT_DEDUP_TIMEOUT = com.bitchat.android.util.AppConstants.UI.SYSTEM_EVENT_DEDUP_TIMEOUT_MS // 5 seconds
     
     // MARK: - Public Message Management
     
@@ -23,9 +23,21 @@ class MessageManager(private val state: ChatState) {
         currentMessages.add(message)
         state.setMessages(currentMessages)
     }
+
+    // Log a system message into the main chat (visible to user)
+    fun addSystemMessage(text: String) {
+        val sys = BitchatMessage(
+            sender = "system",
+            content = text,
+            timestamp = Date(),
+            isRelay = false
+        )
+        addMessage(sys)
+    }
     
     fun clearMessages() {
         state.setMessages(emptyList())
+        state.setChannelMessages(emptyMap())
     }
     
     // MARK: - Channel Message Management
@@ -41,8 +53,18 @@ class MessageManager(private val state: ChatState) {
         currentChannelMessages[channel] = channelMessageList
         state.setChannelMessages(currentChannelMessages)
         
-        // Update unread count if not currently in this channel
-        if (state.getCurrentChannelValue() != channel) {
+        // Update unread count if not currently viewing this channel
+        // Consider both classic channels (state.currentChannel) and geohash location channel selection
+        val viewingClassicChannel = state.getCurrentChannelValue() == channel
+        val viewingGeohashChannel = try {
+            if (channel.startsWith("geo:")) {
+                val geo = channel.removePrefix("geo:")
+                val selected = state.selectedLocationChannel.value
+                selected is com.bitchat.android.geohash.ChannelID.Location && selected.channel.geohash.equals(geo, ignoreCase = true)
+            } else false
+        } catch (_: Exception) { false }
+
+        if (!viewingClassicChannel && !viewingGeohashChannel) {
             val currentUnread = state.getUnreadChannelMessagesValue().toMutableMap()
             currentUnread[channel] = (currentUnread[channel] ?: 0) + 1
             state.setUnreadChannelMessages(currentUnread)
@@ -222,6 +244,49 @@ class MessageManager(private val state: ChatState) {
             }
         }
         state.setChannelMessages(updatedChannelMessages)
+    }
+
+    // Remove a message from all locations (main timeline, private chats, channels)
+    fun removeMessageById(messageID: String) {
+        // Main timeline
+        run {
+            val list = state.getMessagesValue().toMutableList()
+            val idx = list.indexOfFirst { it.id == messageID }
+            if (idx >= 0) {
+                list.removeAt(idx)
+                state.setMessages(list)
+            }
+        }
+        // Private chats
+        run {
+            val chats = state.getPrivateChatsValue().toMutableMap()
+            var changed = false
+            chats.keys.toList().forEach { key ->
+                val msgs = chats[key]?.toMutableList() ?: mutableListOf()
+                val idx = msgs.indexOfFirst { it.id == messageID }
+                if (idx >= 0) {
+                    msgs.removeAt(idx)
+                    chats[key] = msgs
+                    changed = true
+                }
+            }
+            if (changed) state.setPrivateChats(chats)
+        }
+        // Channels
+        run {
+            val chans = state.getChannelMessagesValue().toMutableMap()
+            var changed = false
+            chans.keys.toList().forEach { ch ->
+                val msgs = chans[ch]?.toMutableList() ?: mutableListOf()
+                val idx = msgs.indexOfFirst { it.id == messageID }
+                if (idx >= 0) {
+                    msgs.removeAt(idx)
+                    chans[ch] = msgs
+                    changed = true
+                }
+            }
+            if (changed) state.setChannelMessages(chans)
+        }
     }
     
     // MARK: - Utility Functions

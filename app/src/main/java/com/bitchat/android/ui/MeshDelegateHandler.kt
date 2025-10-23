@@ -1,6 +1,7 @@
 package com.bitchat.android.ui
 
 import com.bitchat.android.mesh.BluetoothMeshDelegate
+import com.bitchat.android.ui.NotificationTextUtils
 import com.bitchat.android.mesh.BluetoothMeshService
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.DeliveryStatus
@@ -55,10 +56,11 @@ class MeshDelegateHandler(
                 message.senderPeerID?.let { senderPeerID ->
                     // Use nickname if available, fall back to sender or senderPeerID
                     val senderNickname = message.sender.takeIf { it != senderPeerID } ?: senderPeerID
+                    val preview = NotificationTextUtils.buildPrivateMessagePreview(message)
                     notificationManager.showPrivateMessageNotification(
-                        senderPeerID = senderPeerID, 
-                        senderNickname = senderNickname, 
-                        messageContent = message.content
+                        senderPeerID = senderPeerID,
+                        senderNickname = senderNickname,
+                        messageContent = preview
                     )
                 }
             } else if (message.channel != null) {
@@ -67,7 +69,7 @@ class MeshDelegateHandler(
                     channelManager.addChannelMessage(message.channel, message, message.senderPeerID)
                 }
             } else {
-                // Public message
+                // Public mesh message - always store to preserve message history
                 messageManager.addMessage(message)
 
                 // Check for mentions in mesh chat
@@ -107,16 +109,21 @@ class MeshDelegateHandler(
                         meshNoiseKeyForPeer = { pid -> getPeerInfo(pid)?.noisePublicKey },
                         meshHasPeer = { pid -> peers.contains(pid) },
                         nostrPubHexForAlias = { alias ->
-                            // Best-effort: derive pub hex from favorites mapping
-                            val prefix = alias.removePrefix("nostr_")
-                            val favs = try { com.bitchat.android.favorites.FavoritesPersistenceService.shared.getOurFavorites() } catch (_: Exception) { emptyList() }
-                            favs.firstNotNullOfOrNull { rel ->
-                                rel.peerNostrPublicKey?.let { s ->
-                                    runCatching { com.bitchat.android.nostr.Bech32.decode(s) }.getOrNull()?.let { dec ->
-                                        if (dec.first == "npub") dec.second.joinToString("") { b -> "%02x".format(b) } else null
+                            // Use GeohashAliasRegistry for geohash aliases, but for mesh favorites, derive from favorites mapping
+                            if (com.bitchat.android.nostr.GeohashAliasRegistry.contains(alias)) {
+                                com.bitchat.android.nostr.GeohashAliasRegistry.get(alias)
+                            } else {
+                                // Best-effort: derive pub hex from favorites mapping for mesh nostr_ aliases
+                                val prefix = alias.removePrefix("nostr_")
+                                val favs = try { com.bitchat.android.favorites.FavoritesPersistenceService.shared.getOurFavorites() } catch (_: Exception) { emptyList() }
+                                favs.firstNotNullOfOrNull { rel ->
+                                    rel.peerNostrPublicKey?.let { s ->
+                                        runCatching { com.bitchat.android.nostr.Bech32.decode(s) }.getOrNull()?.let { dec ->
+                                            if (dec.first == "npub") dec.second.joinToString("") { b -> "%02x".format(b) } else null
+                                        }
                                     }
-                                }
-                            }?.takeIf { it.startsWith(prefix, ignoreCase = true) }
+                                }?.takeIf { it.startsWith(prefix, ignoreCase = true) }
+                            }
                         },
                         findNoiseKeyForNostr = { key -> com.bitchat.android.favorites.FavoritesPersistenceService.shared.findNoiseKey(key) }
                     )
@@ -280,4 +287,5 @@ class MeshDelegateHandler(
     fun getPeerInfo(peerID: String): com.bitchat.android.mesh.PeerInfo? {
         return getMeshService().getPeerInfo(peerID)
     }
+
 }
